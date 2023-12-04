@@ -15,8 +15,8 @@ defineModule(sim, list(
   citation = list("citation.bib"),
   documentation = list("NEWS.md", "README.md", "attributionCovars.Rmd"),
   reqdPkgs = list("PredictiveEcology/SpaDES.core@development (>= 2.0.3.9000)",
-                  "terra", "PredictiveEcology/reproducible (>= 2.0.10.9001)",
-                  "googledrive"),
+                  "terra", "PredictiveEcology/reproducible@modsForLargeArchives (>= 2.0.10.9003)", 
+                  "data.table", "googledrive"),
   parameters = bindrows(
     defineParameter("cleanScratch", "character", NULL, NA, NA,
                     paste0("If the scratch dir should be claned after each focal operation, pass",
@@ -63,37 +63,40 @@ defineModule(sim, list(
                           "area obtained using `reproducible::studyAreaName()`"),
   ),
   inputObjects = bindrows(
+    expectsInput(objectName = "studyArea", objectClass = "", 
+                 desc = paste0("Shapefile of the study area.",
+                               "It is needed only if the disturbance raster is not provided.",
+                               "Used in .inputObjects but not in the simuation")),
     expectsInput(objectName = "rasterToMatch", objectClass = "RasterLayer", 
                  desc = paste0("Raster that has only 1's inside the study area and NA's outside.",
-                               "This is the study area shapefile rasterized -- large raster ",
-                               "operations are less prone to failure using rasters."
-                               "Apart from delimiting the study area, this object is needed for ",
-                               "fixing the disturbance layers if these only have values when the"
+                               "This is the study area shapefile rasterized.",
+                               "This object is needed for ",
+                               "fixing the disturbance layers if these only have values when the",
                                " pixel has been disturbed, and NA's otherwise")),
     expectsInput(objectName = "locationsToExtract", objectClass = "SpatVector", 
                  desc = paste0("Points as a SpatVector with the locations of the bird point counts.",
                                " This is used to extract the covariates from the original rasters."))
   ),
   outputObjects = bindrows(
-    createsOutput(objectName = "disturbanceBreedingGrounds", objectClass = "list", # focalYearList previously 
+    createsOutput(objectName = "disturbanceBreedingGrounds", objectClass = "list", 
                   desc = paste0("This is a list of rasters, each one for a year of ",
                                 "focal disturbances (in a stack if more than one focal distance)")),
-    createsOutput(objectName = "climate", objectClass = "list", 
+    createsOutput(objectName = "climateRaster", objectClass = "list", 
                   desc = paste0("This is a list of rasters, each one for a year of ",
                                 "climate variables (in a stack if more than one variable)")),
-    createsOutput(objectName = "landcover", objectClass = "list", # focalYearList previously 
+    createsOutput(objectName = "LandCoverRaster", objectClass = "list", 
                   desc = paste0("This is a list of rasters, each one for a year of ",
                                 "landcover rasters")),
-    createsOutput(objectName = "disturbanceWinteringGrounds", objectClass = "list", # focalYearList previously 
+    createsOutput(objectName = "disturbanceWinteringGrounds", objectClass = "list", 
                   desc = paste0("This is a list of rasters, each one for a year of ",
                                 "focal disturbances")),
-    createsOutput(objectName = "covariatesTable", objectClass = "data.table", # focalYearList previously 
+    createsOutput(objectName = "covariatesTable", objectClass = "data.table", 
                   desc = paste0("This is a data table containing all the following information: ",
                                 "location (x), location (y), variable, value, year, where variable ",
                                 "may be: MAP, MAT, NFFD, PPT_wt, Tave_sm, landcover, BCR, Province,
                                 species, counts, offsets, focal_0, focal_100, focal_500, focal_1000, 
                                 disturbanceWintering")),
-    createsOutput(objectName = "covariatesStack", objectClass = "SpatRaster", # focalYearList previously 
+    createsOutput(objectName = "covariatesStack", objectClass = "SpatRaster", 
                   desc = paste0("This is a raster stack in terra containing all the following layers: ",
                                 "MAP, MAT, NFFD, PPT_wt, Tave_sm, landcover, BCR, Province, focal_0, 
                                 focal_100, focal_500, focal_1000, disturbanceWintering. These are ",
@@ -122,10 +125,11 @@ doEvent.attributionCovars = function(sim, eventTime, eventType) {
       sim <- scheduleEvent(sim, start(sim), "attributionCovars", "prepareCovariatesTableAndRasters")
     },
     prepareRTMandLocationData = {
+      cacheTags <- c(currentModule(sim), "function:prepareRTMandLocationData")
       
-      # Prepare RTM (split)
+      # # Prepare RTM (split)
       mod$splittedRTM <- tryCatch({
-        Cache(SpaDES.tools::splitRaster, 
+        Cache(SpaDES.tools::splitRaster,
               r = sim$rasterToMatch,
               nx = P(sim)$nx,
               ny = P(sim)$ny,
@@ -138,29 +142,30 @@ doEvent.attributionCovars = function(sim, eventTime, eventType) {
         message(paste0("Caching of ", paste0("splitRTM_x", P(sim)$nx, "y",
                                              P(sim)$ny), " failed. Trying to manually ",
                        "recover the file..."))
-        TAG <- paste0("splitRTM_x", P(sim)$nx, "y", 
+        TAG <- paste0("splitRTM_x", P(sim)$nx, "y",
                       P(sim)$ny)
         ch <- setkey(showCache(userTag = TAG), "createdDate")
         cacheID <- ch[NROW(ch), cacheId]
-        fl <- list.files(Paths$cachePath, recursive = TRUE, 
+        fl <- list.files(Paths$cachePath, recursive = TRUE,
                          full.names = TRUE, pattern = cacheID)
         qs::qread(fl)
       })
-      browser()
-      # Prepare Location data matching RTM's splitted rasters. This needs to be a list of 
-      # shapefiles matching the raster's locations
-      # mod$splittedLocations <- 
-        
+      
+      # Prepare Location data matching RTM's splitted rasters. This needs to be a vector of 
+      # points (terra::vect object) to extract the rasters' information from. 
+      mod$splittedLocations <- splitLocations(splittedRTM = mod$splittedRTM,
+                                              locations = sim$locationsToExtract) # Crop the points to lists to match the extent of the raster.
       },
     getData = {
+      cacheTags <- c(currentModule(sim), "function:getData")
       # Check for each dataset. If existing, no need to get the data again. 
-      
-      browser() # Get all data needed for each year
       
       mod$disturbanceBreeding <- Cache(prepInputs, url = paste0(
         "https://opendata.nfis.org/downloads/",
         "forest_change/CA_forest_harvest_mask",
         "_year_1985_2015.zip"),
+        rasterToMatch = sim$rasterToMatch,
+        studyArea = sim$studyArea,
         userTags = c("objectName:disturbanceBreeding",
                      cacheTags,
                      "outFun:Cache", "goal:prepDisturbanceBreeding"),
@@ -168,6 +173,27 @@ doEvent.attributionCovars = function(sim, eventTime, eventType) {
         targetFile = "CA_harvest_year_1985_2015.tif",
         destinationPath = getOption("reproducible.inputPaths"))
       
+      mod$LandCoverRaster <- Cache(prepInputs, url = paste0(
+        "https://opendata.nfis.org/downloads/forest_change/CA_forest_VLCE2_", time(sim),".zip"),
+        rasterToMatch = sim$rasterToMatch,
+        studyArea = sim$studyArea,
+        userTags = c(paste0("objectName:landcover_", time(sim)),
+                     cacheTags,
+                     "outFun:Cache", "goal:prepLandcover"),
+        omitArgs = c("overwrite", "destinationPath"),
+        targetFile = paste0("CA_forest_VLCE2_", time(sim),".tif"),
+        destinationPath = getOption("reproducible.inputPaths"))
+      
+      mod$climateRaster <- Cache(prepInputs, url = paste0(
+        "https://opendata.nfis.org/downloads/forest_change/CA_forest_VLCE2_", time(sim),".zip"),
+        rasterToMatch = sim$rasterToMatch,
+        studyArea = sim$studyArea,
+        userTags = c(paste0("objectName:landcover_", time(sim)),
+                     cacheTags,
+                     "outFun:Cache", "goal:prepLandcover"),
+        omitArgs = c("overwrite", "destinationPath"),
+        targetFile = paste0("CA_forest_VLCE2_", time(sim),".tif"),
+        destinationPath = getOption("reproducible.inputPaths"))
       
     },
     prepareDisturbanceBreedingGrounds = {
@@ -243,7 +269,7 @@ doEvent.attributionCovars = function(sim, eventTime, eventType) {
       
       # yearsForFullRasters # MAKE SURE THIS GETS CHECKED AND THE FULL RASTERS ARE CREATED ONLY FOR THESE 
       # locationsToExtract # Make sure to use this
-      
+      # "https://opendata.nfis.org/downloads/forest_change/CA_forest_VLCE2_1984.zip"
       browser() 
       mod$splittedLCC <- tryCatch({
         Cache(SpaDES.tools::splitRaster, 
@@ -297,16 +323,41 @@ doEvent.attributionCovars = function(sim, eventTime, eventType) {
   cacheTags <- c(currentModule(sim), "function:.inputObjects") ## uncomment this if Cache is being used
   dPath <- asPath(getOption("reproducible.destinationPath", dataPath(sim)), 1)
   message(currentModule(sim), ": using dataPath '", dPath, "'.")
+  
+  if (!any(all(suppliedElsewhere("studyArea", sim), suppliedElsewhere("rasterToMatch", sim)),
+           all(!suppliedElsewhere("studyArea", sim), !suppliedElsewhere("rasterToMatch", sim))))
+    stop("Please, either supply both studyArea and rasterToMatch, or none to use defaults (Canadian Boreal)")
+  
+  if (!suppliedElsewhere("studyArea", sim)){
+    sim$studyArea <- Cache(prepInputs, url = "https://drive.google.com/file/d/1of3bIlPnLMDmumerLX-thILHtAoJpeiC", 
+                           targetFile = "studyArea.shp", 
+                           archive = "studyArea.zip", 
+                           alsoExtract = "similar", 
+                           destinationPath = getOption("reproducible.inputPaths"), 
+                           fun = "terra::vect",
+                           userTags = c("objectName:studyArea",
+                                        cacheTags,
+                                        "goal:sA"),
+                           omitArgs = c("destinationPath"))
+    
+  }
 
   if (!suppliedElsewhere("rasterToMatch", sim)){
     sim$rasterToMatch <- Cache(prepInputs, url = "https://drive.google.com/file/d/1hSn2Rdiyou9znGRfmJlsUJ-p2fcHX6Uy",
                                targetFile = "processedRTM.tif",
+                               fun = "terra::rast",
                                archive = "processedRTM.zip",
                                destinationPath = getOption("reproducible.inputPaths"),
                                userTags = c("originPoint:global", "objectName:rasterToMatch"),
                                omitArgs = "destinationPath")
   }
   
+  if (!suppliedElsewhere("locationsToExtract", sim)){
+  # Make a module to get this data once BAM makes it available
+  # In the meantime, loading a local potentially compatible dataset (from Alberto's work)
+  sim$locationsToExtract <- exampleLocations()
+  }
+
   return(invisible(sim))
 }
 
